@@ -24,3 +24,18 @@ def predict():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+    
+@app.route('/form', methods=['GET', 'POST'])
+def form():
+    if request.method == 'POST':
+        vals = [float(x) for x in request.form['features'].split(',')]
+        df = pd.DataFrame([vals])
+        pred = model.predict(df)[0]
+        label = 'FRAUD' if pred == 1 else 'LEGITIMATE'
+        return f"<h2>Prediction: {label}</h2>"
+    return '''
+      <form method="post">
+        Enter comma-separated features: <input name="features" size="80">
+        <input type="submit" value="Predict">
+      </form>
+    '''
