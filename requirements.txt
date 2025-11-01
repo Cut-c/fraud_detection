@@ -1,4 +1,5 @@
+Flask
 pandas
-scikit-learn
 joblib
-schedule
+scikit-learn
+gunicorn
