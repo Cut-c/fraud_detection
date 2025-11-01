@@ -3,7 +3,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # Load model
 model = joblib.load("best_model.pkl")
