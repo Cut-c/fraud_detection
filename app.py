@@ -40,5 +40,5 @@ def predict():
     except Exception as e:
         return render_template("index.html", prediction_text=f"Error: {e}", color="black")
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
