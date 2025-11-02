@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, request, render_template
 import joblib
 import pandas as pd
@@ -17,8 +16,10 @@ model = joblib.load("best_model.pkl")
 FRAUD_THRESHOLD = 30.0  # show Fraudulent when probability >= 30%
 
 # Normalization constants - replace with exact scaler.mean_ and scaler.scale_ from your training
+# These values seem to be placeholders or averages.
+# For the app to be accurate, these MUST match the scalers used to train "best_model.pkl"
 AMOUNT_MEAN, AMOUNT_STD = 88.35, 250.12
-TIME_MEAN, TIME_STD = 47000.0, 29000.0
+TIME_MEAN, TIME_STD = 47000.0, 29000.0  # These are very round numbers, suspect they are wrong
 
 # Helper to write audit log
 def log_prediction(record: dict):
@@ -61,7 +62,12 @@ def predict():
         except ValueError:
             time_val = 0.0
 
-        # Deterministic generation of V5..V28 based on supplied input (so repeated calls with same inputs are reproducible)
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # !! BRUTAL, REAL PROBLEM IS HERE !!
+        # This code IGNORES the real V5-V28 values and GENERATES FAKE RANDOM DATA.
+        # This is why your app gives a different prediction than your CSV.
+        # You are sending 24 columns of GARBAGE to your model.
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         seed_str = ",".join(str(input_data[f"V{i}"]) for i in range(1,5)) + f",{amount},{time_val}"
         seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**32)
         rand = random.Random(seed)
@@ -109,9 +115,15 @@ def predict():
         generated = {f"V{i}": input_data[f"V{i}"] for i in range(5, 29)}
 
         # Log prediction for audit
-        log_record = {{"timestamp": datetime.utcnow().isoformat(), "V1": input_data["V1"], "V2": input_data["V2"],
-                         "V3": input_data["V3"], "V4": input_data["V4"], "Amount": amount, "Time": time_val,
-                         "probability": f"{prob:.4f}", "label": ("Fraud" if is_fraud else "Legit")}, **generated}
+        # --- THIS IS THE FIX for the SyntaxError ---
+        # Removed the extra curly braces {{ ... }}
+        log_record = {"timestamp": datetime.utcnow().isoformat(), "V1": input_data["V1"],
+                      "V2": input_data["V2"],
+                      "V3": input_data["V3"], "V4": input_data["V4"], "Amount": amount, "Time": time_val,
+                      "probability": f"{prob:.4f}", "label": ("Fraud" if is_fraud else "Legit"),
+                      **generated}
+        # -------------------------------------------
+        
         # write log (non-blocking is fine here; small writes)
         log_prediction(log_record)
 
