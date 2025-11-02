@@ -13,7 +13,7 @@ app = Flask(__name__)
 model = joblib.load("best_model.pkl")
 
 # Threshold (percent) to mark as Fraudulent on UI
-FRAUD_THRESHOLD = 30.0  # show Fraudulent when probability >= 30%
+FRAUD_THRESHOLD = 35.0  # show Fraudulent when probability >= 35%
 
 # Normalization constants - replace with exact scaler.mean_ and scaler.scale_ from your training
 # These values seem to be placeholders or averages.
