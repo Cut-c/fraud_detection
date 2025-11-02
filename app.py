@@ -1,13 +1,35 @@
+# app.py
 from flask import Flask, request, render_template
 import joblib
 import pandas as pd
+import hashlib
 import random
+import csv
+import os
+from datetime import datetime
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Load trained model
+# Load trained model (must be in repo root or adjust path)
 model = joblib.load("best_model.pkl")
+
+# Threshold (percent) to mark as Fraudulent on UI
+FRAUD_THRESHOLD = 30.0  # show Fraudulent when probability >= 30%
+
+# Normalization constants - replace with exact scaler.mean_ and scaler.scale_ from your training
+AMOUNT_MEAN, AMOUNT_STD = 88.35, 250.12
+TIME_MEAN, TIME_STD = 47000.0, 29000.0
+
+# Helper to write audit log
+def log_prediction(record: dict):
+    logfile = "pred_history.csv"
+    header = list(record.keys())
+    first = not os.path.exists(logfile)
+    with open(logfile, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if first:
+            writer.writeheader()
+        writer.writerow(record)
 
 @app.route("/")
 def home():
@@ -16,90 +38,91 @@ def home():
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # All features the model expects (V1..V28 + normalized_amount + normalized_time)
-        all_features = [f"V{i}" for i in range(1, 29)] + ["normalized_amount", "normalized_time"]
+        # Model expects V1..V28 and normalized_amount, normalized_time
+        feature_names = [f"V{i}" for i in range(1, 29)] + ["normalized_amount", "normalized_time"]
+        input_data = {fn: 0.0 for fn in feature_names}
 
-        # Initialize all features as 0.0
-        input_data = {col: 0.0 for col in all_features}
-
-        # --- 1) Fill V1-V4 from user input (if provided) ---
-        for key in ["V1", "V2", "V3", "V4"]:
-            value = request.form.get(key)
-            if value and value.strip() != "":
+        # Read V1-V4 from form
+        for k in ["V1", "V2", "V3", "V4"]:
+            v = request.form.get(k)
+            if v and v.strip() != "":
                 try:
-                    input_data[key] = float(value)
+                    input_data[k] = float(v)
                 except ValueError:
-                    # if parse fails, keep default 0.0
-                    input_data[key] = 0.0
+                    input_data[k] = 0.0
 
-        # --- 2) Generate V5-V28 automatically with alternating signs ---
-        # Choose starting sign randomly: +1 or -1
-        start_sign = random.choice([1, -1])
-        sign = start_sign
-
-        # magnitude range for generated PCA-like values (adjustable)
-        mag_min, mag_max = 0.5, 8.0
-
-        # fill V5..V28
-        for i in range(5, 29):  # 5..28 inclusive
-            magnitude = random.uniform(mag_min, mag_max)
-            input_data[f"V{i}"] = sign * magnitude
-            sign *= -1  # alternate sign for next feature
-
-        # --- 3) Handle Amount and Time from user form (default 0.0 if missing) ---
+        # Read raw amount & time
         try:
             amount = float(request.form.get("Amount")) if request.form.get("Amount") else 0.0
         except ValueError:
             amount = 0.0
-
         try:
-            time = float(request.form.get("Time")) if request.form.get("Time") else 0.0
+            time_val = float(request.form.get("Time")) if request.form.get("Time") else 0.0
         except ValueError:
-            time = 0.0
+            time_val = 0.0
 
-        # --- 4) Normalize Amount and Time to match training ---
-        # Replace these constants with the exact scaler.mean_ and scaler.scale_ from your training for best results
-        amount_mean, amount_std = 88.35, 250.12   # <-- placeholder values; replace if you have real ones
-        time_mean, time_std = 47000.0, 29000.0    # <-- placeholder values; replace if you have real ones
+        # Deterministic generation of V5..V28 based on supplied input (so repeated calls with same inputs are reproducible)
+        seed_str = ",".join(str(input_data[f"V{i}"]) for i in range(1,5)) + f",{amount},{time_val}"
+        seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**32)
+        rand = random.Random(seed)
 
-        # avoid division by zero
-        if amount_std == 0:
+        start_sign = rand.choice([1, -1])
+        sign = start_sign
+        mag_min, mag_max = 0.5, 8.0
+        for i in range(5, 29):
+            mag = rand.uniform(mag_min, mag_max)
+            input_data[f"V{i}"] = sign * mag
+            sign *= -1
+
+        # Normalize amount and time (use same scaling as training)
+        if AMOUNT_STD != 0:
+            input_data["normalized_amount"] = (amount - AMOUNT_MEAN) / AMOUNT_STD
+        else:
             input_data["normalized_amount"] = 0.0
+        if TIME_STD != 0:
+            input_data["normalized_time"] = (time_val - TIME_MEAN) / TIME_STD
         else:
-            input_data["normalized_amount"] = (amount - amount_mean) / amount_std
-
-        if time_std == 0:
             input_data["normalized_time"] = 0.0
-        else:
-            input_data["normalized_time"] = (time - time_mean) / time_std
 
-        # --- 5) Build dataframe in correct order ---
-        input_df = pd.DataFrame([input_data], columns=all_features)
+        # Create dataframe in the exact column order expected by the model
+        input_df = pd.DataFrame([input_data], columns=feature_names)
 
-        # --- 6) Predict ---
-        prob = None
+        # Get probability (if model supports predict_proba)
         try:
-            prob = model.predict_proba(input_df)[0][1] * 100  # fraud probability %
-        except AttributeError:
-            # model may not implement predict_proba (rare); fall back to predict
-            pred_only = model.predict(input_df)[0]
-            prob = 100.0 if pred_only == 1 else 0.0
+            prob = model.predict_proba(input_df)[0][1] * 100.0  # percent
+        except Exception:
+            # fallback if model has no predict_proba
+            pred = model.predict(input_df)[0]
+            prob = 100.0 if pred == 1 else 0.0
 
-        # Use probability threshold to decide label (you can adjust threshold if needed)
-        threshold = 50.0  # percent
-        if prob >= threshold:
+        # Decide label based on FRAUD_THRESHOLD
+        if prob >= FRAUD_THRESHOLD:
             label = f"⚠ Fraudulent Transaction (Risk: {prob:.2f}%)"
             color = "red"
+            is_fraud = True
         else:
             label = f"✅ Legitimate Transaction (Risk: {prob:.2f}%)"
             color = "green"
+            is_fraud = False
 
-        # Optionally include generated features in the UI (not implemented in template)
-        return render_template("index.html", prediction_text=label, color=color)
+        # Prepare generated features for display (V5..V28)
+        generated = {f"V{i}": input_data[f"V{i}"] for i in range(5, 29)}
+
+        # Log prediction for audit
+        log_record = {{"timestamp": datetime.utcnow().isoformat(), "V1": input_data["V1"], "V2": input_data["V2"],
+                         "V3": input_data["V3"], "V4": input_data["V4"], "Amount": amount, "Time": time_val,
+                         "probability": f"{prob:.4f}", "label": ("Fraud" if is_fraud else "Legit")}, **generated}
+        # write log (non-blocking is fine here; small writes)
+        log_prediction(log_record)
+
+        return render_template("index.html",
+                               prediction_text=label,
+                               color=color,
+                               probability=f"{prob:.2f}",
+                               generated_features=generated)
 
     except Exception as e:
         return render_template("index.html", prediction_text=f"Error: {e}", color="black")
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
